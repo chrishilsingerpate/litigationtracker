@@ -1,0 +1,74 @@
+---
+title: "Litigation Summary"
+output:
+  word_document:
+    reference_docx: AwesomeRmarkdownWordReport.docx
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+library(knitr)
+library(officedown)
+library(officer)
+library(ggplot2)
+library(tidyverse)
+library(broom)
+library(flextable)
+library(scales) # to access break formatting functions
+
+# set chunks defaults
+knitr::opts_chunk$set(
+  echo       = FALSE,
+  message    = FALSE,
+  warning    = FALSE
+)
+# set flextable defaults
+knitr::opts_chunk$set(echo = TRUE, fig.cap = TRUE)
+  set_flextable_defaults(
+  font.family = "Arial", font.size = 9, 
+  theme_fun = "theme_vanilla",
+  big.mark="", table.layout="autofit")
+  
+# formatting properties for specific paragraphs
+centeredP <- fp_par(text.align = "center")
+```
+# Introduction
+
+This document includes information regarding the selected litigation cases. A general overview of the cases and metrics reflecting the success of the firm are included.
+
+# Data
+
+This dataset contains data from selected cases. 
+
+```{r data, echo = FALSE,eval=T}
+ values$selectedcases %>% dplyr::select(case_name,attorney1,case_type,
+                                        date_of_assignment, date_of_resolution,
+                                        offer_amt_998, offer_accept_998,
+                                        settlement_authority, actual_settlement) %>% 
+flextable() %>% autofit()
+run_pagebreak()
+```
+
+# Settlement Analysis
+
+```{r settlement analysis, echo = FALSE, fig.width = 7, fig.height=7}
+
+values$selectedcases %>% make_long() %>% plot_settlements()
+
+values$selectedcases$date_of_assignment <- as.Date(values$selectedcases$date_of_assignment, "%Y-%m-%d")
+values$selectedcases$date_of_resolution <- as.Date(values$selectedcases$date_of_resolution, "%Y-%m-%d")
+values$selectedcases$datedur <- difftime(values$selectedcases$date_of_resolution,values$selectedcases$date_of_assignment, units = "days")
+avgdur <- mean(values$selectedcases$datedur)
+
+```
+**Total savings:** `r format(as.integer(sum(values$selectedcases$savings, na.rm=T)), nsmall=1, big.mark=",")`
+
+**Percent of authority:** `r scales::percent(as.integer(sum(values$selectedcases$actual_settlement))/sum(values$selectedcases$settlement_authority), accuracy = 0.1)`
+
+**Average duration of case:** `r round(avgdur,1)` days
+
+
+# Notes
+
+(Add any additional notes here)
+
