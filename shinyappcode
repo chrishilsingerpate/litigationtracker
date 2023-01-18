@@ -1,0 +1,283 @@
+library(shiny)
+library(googlesheets4)
+library(gridExtra)
+library(tidyverse)
+library(shinydashboard)
+library(DT)
+
+# sheetid <- "link to Google Sheet"
+
+# authenticate your Google account 
+options(gargle_oauth_cache = ".secrets")
+drive_auth(cache = ".secrets", email = "youremail@gmail.com")
+gs4_auth(token = drive_token())
+
+# after you've logged in once locally, the following line will log-in automatically
+gs4_auth(cache = ".secrets", email = "lawshinyapp@gmail.com")
+
+# values that will be used in UI input 
+yesno <- c("Yes","No")
+trial <- c("NA","Judge","Jury")
+casetype <- c("Construction","Real Estate","Professional Liability",
+              "Personal Injury","Other")
+              
+          
+# functions
+# this function will make the data long; this will be necessary for the plots 
+make_long<-function(casedb){
+  data.frame(
+    case_name=c(casedb$case_name,casedb$case_name),
+    settlement=c(rep("settlement_authority",nrow(casedb)),rep("actual_settlement",nrow(casedb))),
+    values=c(casedb$settlement_authority,casedb$actual_settlement)
+  )
+} 
+
+# this function creates a plot out of the long data; used on numerous pages
+plot_settlements<-function(DF){
+  ggplot(data = DF, aes(x = case_name, y = values, fill = settlement)) +
+    geom_col(position = "dodge")+
+    coord_flip()+
+    labs(x = "Case Name", y = "Value ($)")+
+    theme_bw()+
+    ggtitle("Settlement Authority vs. Actual Settlement")+
+    theme(plot.title = element_text(hjust = 0.5))+
+    scale_fill_manual(name = "Settlement", values = c("dodgerblue4","gray65"),
+                      labels = c("Actual Settlement","Settlement Authority"))
+}
+
+# this function generates the datatable that is displayed on the Reports tab
+make_table<-function(DF){
+  DT::datatable(DF,
+                selection = 'single',
+                editable = F,
+                rownames = F,
+                extensions = 'Buttons',
+                options = list(
+                  columnDefs = list(list(className = 'dt-center',targets = "_all")),
+                  paging = F,
+                  fixedColumns = TRUE,
+                  ordering = TRUE,
+                  scrollY = "500px",
+                  scrollX = T,
+                  # autoWidth = T,
+                  searching = T,
+                  dom = 'Bfrtip',
+                  buttons = c('csv', 'excel',"pdf"),
+                  scrollCollapse = T,
+                  stateSave = F
+                ),
+                class = "cell-border"
+                # filter = 'top',
+                # escape =F
+  )
+}
+
+# the following two functions produce and test the development of the Rmarkdown report
+drop_report<-function(values){
+  rmarkdown::render(
+    input = file.path("casereport.Rmd"),
+    output_format = "word_document",
+    output_file = file.path("casereport.docx"),
+    quiet = T
+  )
+}
+
+test_report<-function(casedb, sample=5){
+  values<-list()
+  values$selectedcases<-casedb[sample(1:nrow(casedb),sample),]
+  rmarkdown::render(
+    input = file.path("casereport.Rmd"),
+    output_format = "word_document",
+    output_file = file.path("casereport.docx"),
+    quiet = T
+  )
+}
+
+ui <- 
+dashboardPage(
+  dashboardHeader(title = "Litigation Tracker"),
+  dashboardSidebar(
+    sidebarMenu(
+      menuItem("Add a case",tabName = "addacase"),      
+      menuItem("Reports",tabName = "reports")
+    )   
+  ),
+  dashboardBody(
+    tabItems(
+      tabItem(
+        "addacase",
+        fluidRow(
+         # utilized columns to better organize info; designed with desktop in mind
+         column(4,
+                 textInput("case_name", "Case Name:",value = ""),
+                 textInput("attorney1", "Attorney 1:", value = ""),
+                 selectInput("case_type", "Case Type:", casetype),
+                 numericInput("offer_amt_998", "998 Offer Amount:", value = 0),
+                 numericInput("actual_settlement","Actual Settlement:", value = 0)),
+          column(4,
+                 textInput("plaintiff","Plaintiff:", value = ""),
+                 textInput("attorney2", "Attorney 2:", value = ""),
+                 dateInput("date_of_assignment","Date of Assignment:", value = ""),
+                 selectInput("offer_accept_998","Was the 998 Offer accepted?",yesno),
+                 selectInput("trial", "Trial?", trial)),
+          column(4,
+                 textInput("defendant","Defendant:", value = ""),
+                 textInput("attorney3", "Attorney 3:", value = ""),
+                 dateInput("date_of_resolution","Date of Resolution:", value = ""),
+                 numericInput("settlement_authority","Settlement Authority:", value = 0),
+                 numericInput("judgment_amount", "Judgment Amount:", value = 0)),
+          column(
+            width = 12,
+            align = "center",
+            actionButton("submit", "Submit")
+          ),
+          
+        
+          
+        #actionButton("submit","Submit"),
+        plotOutput("barplot")
+    )
+      ),
+      tabItem(
+        "reports",
+        selectInput("case_name_select", "Select by Case Name:",
+                    choices = c("All", unique(casedb$case_name)), multiple = TRUE),
+        selectInput("case_type_select", "Select by Case Type:", 
+                    choices = c("All", unique(casedb$case_type)), multiple = TRUE),
+        dateRangeInput("date_range", "Select by Date of Resolution:", 
+                       start = min(casedb$date_of_resolution), 
+                       end = max(casedb$date_of_resolution)),
+        DT::dataTableOutput("selectedcases"), style = "overflow-x: scroll",
+        #DTOutput("selectedcases"),
+        plotOutput("report_plot"),
+        downloadButton('download',"Download the data")
+      )
+      )
+    ))
+server <- function(input, output, session) {
+  
+ # working with reactive data; set it up so the most recently added case is added to and read from database
+  values<-reactiveValues()
+  values$casedb <- read_sheet(sheetid)
+  values$selectedcases <- NULL
+  
+  observeEvent(input$submit, {
+    #new case-----
+    case_data <- data.frame(
+      case_name = ifelse(is.null(input$case_name), "", input$case_name),
+      attorney1 = ifelse(is.null(input$attorney1), "", input$attorney1),
+      #is.null wasn't working because empty space wasn't registering as null
+      #nchar counts how many characters; if no input, 0 characters
+      attorney2 = ifelse(nchar(input$attorney2) == 0, "NA", input$attorney2),
+      attorney3 = ifelse(nchar(input$attorney3) == 0, "NA", input$attorney3),
+      plaintiff = ifelse(is.null(input$plaintiff), "", input$plaintiff),
+      defendant = ifelse(is.null(input$defendant), "", input$defendant),
+      case_type = ifelse(is.null(input$case_type), "", input$case_type),
+      date_of_assignment = ifelse(is.null(input$date_of_assignment), "", 
+                                  as.character(input$date_of_assignment)),
+      date_of_resolution = ifelse(is.null(input$date_of_resolution), "", 
+                                  as.character(input$date_of_resolution)),
+      offer_amount_998 = ifelse(is.null(input$offer_amt_998), 0, input$offer_amt_998),
+      offer_accept_998 = ifelse(is.null(input$offer_accept_998), "", input$offer_accept_998),
+      settlement_authority = ifelse(is.null(input$settlement_authority), 0, input$settlement_authority),
+      actual_settlement = ifelse(is.null(input$actual_settlement), 0, input$actual_settlement),
+      trial = ifelse(is.null(input$trial),"", input$trial),
+      judgment_amount = ifelse(is.null(input$judgment_amount), "NA", input$judgment_amount),
+      savings = (input$settlement_authority - input$actual_settlement),
+      pct_of_auth = (input$actual_settlement/input$settlement_authority)
+    )
+    # sheet_append adds data to the Google Sheet that is functioning as a database
+    sheet_append(sheetid, case_data)
+    
+    values$casedb <- read_sheet(sheetid)
+    
+    # ------
+    # output is the plot using only reactive values from the most recently added case 
+    output$barplot <- renderPlot({
+      values$casedb[which(values$casedb$case_name==case_data$case_name),] %>% # addedcase
+        make_long() %>% 
+        plot_settlements()
+    })
+    
+  }
+  )
+  #text----
+  
+
+  
+  observeEvent(input$submit,{
+    req(input$submit)
+    
+    # Update the case name input options
+    updateSelectInput(session, "case_name_select", 
+                      choices = c("All", unique(values$casedb$case_name)))
+    
+    # Update the case type input options
+    updateSelectInput(session, "case_type_select", 
+                      choices = c("All", unique(values$casedb$case_type)))
+    # Update the date input options 
+    updateDateRangeInput(session, "date_range",
+                         start = min(values$casedb$date_of_resolution), 
+                         end = max(values$casedb$date_of_resolution))
+  }) 
+  observe({
+    CN<-CT<-CR1<-CR2<-rep(T,length(values$casedb$case_name))
+    
+    if(length(input$case_name_select)!=0){
+      CN<-values$casedb$case_name%in%input$case_name_select
+    }
+    
+    if(length(input$case_type_select)!=0){
+      CT<-values$casedb$case_type%in%input$case_type_select
+    }
+    
+    if(!is.na(input$date_range[1])){
+      CR1<-as.Date(values$casedb$date_of_resolution)>=as.Date(input$date_range[1],origin = )
+    }
+    if(!is.na(input$date_range[2])){
+      CR2<-as.Date(values$casedb$date_of_resolution)<=as.Date(input$date_range[2])
+    }
+    # lubridate withnin or input$date_range[1]  input$date_range[2]
+    
+    values$selectedcases<-values$casedb[which(CN&CT&CR1&CR2),]
+    
+  })
+  #tables =-------
+  output$selectedcases<-renderDT({
+    values$selectedcases %>% make_table()
+  })
+  
+  
+  output$report_plot <- renderPlot({
+    values$selectedcases %>% make_long() %>% plot_settlements()
+  })
+  
+  
+  
+  
+  #download ------
+  output$download <- downloadHandler(
+    filename = paste0("report_litigation",Sys.Date(),".docx"),
+    content = function(file) {
+  
+      file.copy("casereport.Rmd", file.path(tempdir(), "casereport.Rmd"), overwrite = TRUE)
+      file.copy("AwesomeRmarkdownWordReport.docx", file.path(tempdir(), "AwesomeRmarkdownWordReport.docx"), overwrite = TRUE)
+      
+      rmarkdown::render(
+        input = file.path(tempdir(), "casereport.Rmd"),
+        output_format = "word_document",
+        output_file = file,
+        quiet = T
+      )
+      
+    }
+  )
+}
+
+  
+
+  
+
+
+# Run the application 
+shinyApp(ui = ui, server = server,options = list(launch.browser=T))
